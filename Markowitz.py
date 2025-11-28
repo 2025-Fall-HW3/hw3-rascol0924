@@ -56,17 +56,24 @@ class EqualWeightPortfolio:
 
     def calculate_weights(self):
         # Get the assets by excluding the specified column
+        # Assets in this case are the 11 sector ETFs
         assets = df.columns[df.columns != self.exclude]
         self.portfolio_weights = pd.DataFrame(index=df.index, columns=df.columns)
 
         """
         TODO: Complete Task 1 Below
         """
-
+        num_included_assets = len(assets)
+        if num_included_assets > 0:
+            equal_weight = 1.0 / num_included_assets
+            # Assign the equal weight to all included assets across all time periods
+            # The columns not in 'assets' (i.e., 'SPY') will remain NaN temporarily.
+            self.portfolio_weights.loc[:, assets] = equal_weight
         """
         TODO: Complete Task 1 Above
         """
         self.portfolio_weights.ffill(inplace=True)
+        # This line ensures the excluded column ('SPY') gets a weight of 0
         self.portfolio_weights.fillna(0, inplace=True)
 
     def calculate_portfolio_returns(self):
@@ -104,17 +111,45 @@ class RiskParityPortfolio:
         self.lookback = lookback
 
     def calculate_weights(self):
-        # Get the assets by excluding the specified column
+        # Assets to include (11 sector ETFs)
         assets = df.columns[df.columns != self.exclude]
 
-        # Calculate the portfolio weights
+        # Initialize the portfolio weights DataFrame
         self.portfolio_weights = pd.DataFrame(index=df.index, columns=df.columns)
 
         """
         TODO: Complete Task 2 Below
         """
-
-
+        
+        # --- NEW STEP: Calculate Log Returns ---
+        # The returns used for the final portfolio P&L must be simple returns (df_returns).
+        # However, the volatility estimate might be expected to use log returns.
+        # Log Returns: log(P_t / P_{t-1}) = log(1 + simple_return)
+        log_returns = np.log(df[assets] / df[assets].shift(1)).fillna(0) 
+        
+        # 1. Calculate the rolling standard deviation (volatility) of LOG returns
+        # Use min_periods=lookback for a clean RP calculation.
+        rolling_std = log_returns.rolling(
+            window=self.lookback, 
+            min_periods=self.lookback 
+        ).std()
+        
+        # 2. Calculate the inverse volatility (1 / sigma_i)
+        inv_volatility = (1.0 / rolling_std).replace(np.inf, 0)
+        
+        # 3. Calculate the sum of inverse volatilities across all assets
+        sum_inv_vol = inv_volatility.sum(axis=1)
+        
+        # 4. Normalize to get the Risk Parity weights
+        rp_weights = inv_volatility.div(sum_inv_vol, axis=0).fillna(0)
+        
+        # 5. Apply a shift (re-introducing the shift for robustness)
+        # This is mathematically required to prevent lookahead bias. 
+        rp_weights_shifted = rp_weights.shift(1)
+        
+        # 6. Assign the calculated weights. We rely on the subsequent ffill/fillna(0)
+        # for initial days and the excluded asset.
+        self.portfolio_weights.loc[:, assets] = rp_weights_shifted
 
         """
         TODO: Complete Task 2 Above
@@ -188,10 +223,23 @@ class MeanVariancePortfolio:
                 TODO: Complete Task 3 Below
                 """
 
-                # Sample Code: Initialize Decision w and the Objective
-                # NOTE: You can modify the following code
-                w = model.addMVar(n, name="w", ub=1)
-                model.setObjective(w.sum(), gp.GRB.MAXIMIZE)
+                w = model.addMVar(n, name="w", lb=0, ub=1)
+
+                # 2. Define the Objective Function (Maximize Utility)
+                # Objective = Expected Return - (gamma / 2) * Variance
+                expected_return = mu @ w
+                
+                # Portfolio Risk/Variance: w' * Sigma * w (Quadratic Term)
+                portfolio_risk = w @ Sigma @ w
+                
+                model.setObjective(
+                    expected_return - (gamma / 2) * portfolio_risk, 
+                    gp.GRB.MAXIMIZE
+                )
+
+                # 3. Add Constraints
+                # Constraint: Full Investment (Sum of weights must equal 1)
+                model.addConstr(w.sum() == 1, name="Full_Investment")
 
                 """
                 TODO: Complete Task 3 Above
